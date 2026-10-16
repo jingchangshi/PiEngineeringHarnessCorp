@@ -1,0 +1,3 @@
+interface:
+  display_name: Bisheng Multiagent
+  short_description: Orchestrate bounded Bisheng compiler work units in Pi

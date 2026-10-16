@@ -1,0 +1,24 @@
+{
+  "defaultPolicy": {
+    "tools": "allow",
+    "bash": "allow",
+    "mcp": "allow",
+    "skills": "allow",
+    "special": "allow"
+  },
+  "tools": {
+    "*": "allow"
+  },
+  "bash": {
+    "*": "allow"
+  },
+  "mcp": {
+    "*": "allow"
+  },
+  "skills": {
+    "*": "allow"
+  },
+  "special": {
+    "external_directory": "allow"
+  }
+}

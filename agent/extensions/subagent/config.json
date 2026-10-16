@@ -1,0 +1,11 @@
+{
+  "defaultSubagentContext": "fresh",
+  "maxSubagentDepth": 1,
+  "maxSubagentSpawnsPerRun": 8,
+  "maxSubagentSpawnsPerSession": 20,
+  "maxActiveAsyncRunsPerSession": 2,
+  "globalConcurrentcyLimit": 2,
+  "parallel": { "maxTasks": 2, "concurrency": 2 },
+  "scheduledRuns": { "enabled": false, "storeRoot": "~/.local/share/pi-subagents/schedules" },
+  "inlineToolDisplay": "summary"
+}

@@ -1,0 +1,31 @@
+{
+  "lastChangelogVersion": "1.2.0",
+  "packages": [
+    "npm:@narumitw/pi-lsp",
+    "npm:@narumitw/pi-progress",
+    "npm:@narumitw/pi-file-context",
+    "npm:pi-permission-system",
+    "npm:pi-subagents"
+  ],
+  "subagents": {
+    "agentOverrides": {
+      "bisheng-scout": {
+        "model": "snapengine/GLM-5.2"
+      },
+      "bisheng-implementer": {
+        "model": "snapengine/GLM-5.2"
+      },
+      "bisheng-verifier": {
+        "model": "snapengine/DeepSeek-V4-Flash-0731"
+      },
+      "bisheng-reviewer": {
+        "model": "snapengine/DeepSeek-V4-Flash-0731"
+      }
+    }
+  },
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 32768,
+    "keepRecentTokens": 20000
+  }
+}

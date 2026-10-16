@@ -1,0 +1,24 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "snapengine": {
+      "baseUrl": "http://127.0.0.1:8787/v1",
+      "api": "openai-completions",
+      "apiKey": "snapengine-local-proxy",
+      "models": [
+        {
+          "id": "DeepSeek-V4-Flash-0731-CodeAgent",
+          "name": "DeepSeek V4 Flash CodeAgent",
+          "contextWindow": 131072,
+          "maxTokens": 32768
+        },
+        {
+          "id": "Glm-5.2",
+          "name": "GLM 5.2",
+          "contextWindow": 131072,
+          "maxTokens": 32768
+        }
+      ]
+    }
+  }
+}

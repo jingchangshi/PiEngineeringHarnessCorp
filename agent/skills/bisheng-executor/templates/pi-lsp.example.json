@@ -1,0 +1,6 @@
+{
+  "clangd": {
+    "command": ["clangd", "--background-index", "--header-insertion=never"],
+    "extensions": [".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp"]
+  }
+}
