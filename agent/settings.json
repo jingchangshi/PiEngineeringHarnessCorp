@@ -16,10 +16,10 @@
         "model": "snapengine/GLM-5.2"
       },
       "bisheng-verifier": {
-        "model": "snapengine/DeepSeek-V4-Flash-0731"
+        "model": "snapengine/DeepSeek-V4-Flash-0731-CodeAgent"
       },
       "bisheng-reviewer": {
-        "model": "snapengine/DeepSeek-V4-Flash-0731"
+        "model": "snapengine/DeepSeek-V4-Flash-0731-CodeAgent"
       }
     }
   },

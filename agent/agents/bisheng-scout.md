@@ -8,6 +8,7 @@ inheritProjectContext: true
 inheritGlobalContext: false
 inheritSkills: false
 skills: bisheng-executor
+subagentOnlyExtensions: ../extensions/arg-frame-fix.ts
 defaultContext: fresh
 async: false
 timeoutMs: 600000

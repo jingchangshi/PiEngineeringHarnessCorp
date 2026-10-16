@@ -1,41 +1,43 @@
 /**
- * Pi Agent 扩展：工具参数“帧”强制规范化 + 不可恢复畸形调用机械阻断（机制级硬约束）。
+ * Pi Agent 扩展：工具参数“帧”归一化（Schema 校验前执行）。
  *
  * 背景（BAPI-02 会话多轮踩坑）：模型偶尔把工具参数错误地包裹成：
- *   - 一个多余的 "arguments" 帧（字符串或对象）：bash:{arguments:'{"command":...}'}
- *   - 值再被包一层：write:{path:{path:...}} 或 edit:{edits:"[{...}]"/单个对象}
- *   - 最严重：整个 input 是空对象 {} 或缺少必需字段（如 write 只有 content 没有 path）
- * 这使得内置工具报 “path/command must have required properties” 并反复重试。
+ *   - bash: {arguments:'{"command":...}'}  （字符串帧）
+ *   - bash: {arguments:{command:...}}       （对象帧）
+ *   - write/edit 同理：{arguments:{path,content}} 等
+ * 这类畸形调用在 Pi 内置工具的 Schema 校验阶段即失败（InputValidationError），
+ * 模型随后反复重试，浪费大量 token。
  *
- * 本扩展分两层处理：
- *   1) 可恢复帧（frame/deep/字符串化）→ 就地改写 event.input 顶层字段，组件层规范化。
- *   2) 不可恢复缺必需字段（空 {}、缺 path 等，无从推断值）→ 直接 return {block:true}
- *      阻断该调用，并输出具体缺哪个字段的诊断；坏调用根本不执行，杜绝"空转一轮校验失败"。
+ * 本扩展通过 `pi.registerTool` 以同名覆盖内置 read/write/edit/bash 工具：
+ *   - 复用内置工厂（createReadToolDefinition / createWriteToolDefinition /
+ *     createEditToolDefinition / createBashToolDefinition）构造的完整实现，
+ *     保留原 Schema、执行逻辑、渲染、constrainedSampling 与 Shell 选项；
+ *   - 仅额外挂一个 `prepareArguments`，在 Schema 校验【之前】做有限归一化：
+ *       1) {arguments:"{...}"}（字符串帧）→ 解包为对象；
+ *       2) {arguments:{...}}（对象帧）→ 解包为对象；
+ *       3) {commands:{command:...}} 类多余帧（值再包一层）→ 顶层字段提升。
+ *   prepareArguments 返回新对象才会生效（agent-loop.js prepareToolCallArguments
+ *   用引用比较判定是否替换）；不命中任何帧时原样返回，不产生任何副作用。
+ *
+ * 归一化原则（相对旧版的关键收敛）：
+ *   - 只解包“多余的 arguments/commands 帧”，不做 path/edits/content 的深度改写；
+ *   - 不再在 tool_call（校验后）事件里改 input —— 那在 Pi 1.2.0 中已无法救回
+ *     校验失败，且文档明确 “No re-validation is performed after mutation”；
+ *   - 不再机械阻断缺字段调用（阻断会打断模型修复节奏，交由 Schema 校验自然报错）。
  *
  * 部署：放到 ~/.pi/agent/extensions/arg-frame-fix.ts，重启 pi 即生效。
- * 无第三方依赖，纯就地 JSON 字段重排 + 事件级机械阻断。
+ * 无第三方依赖。
  */
 import type {
 	ExtensionAPI,
-	ToolCallEvent,
-	ToolCallEventResult,
+	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-
-/** 需要强制存在必需字段的工具（read/grep/find/ls 无严格必需字段，不阻断）。 */
-const REQUIRED: Record<string, string[]> = {
-	bash: ["command"],
-	powershell: ["command"],
-	write: ["path", "content"],
-	edit: ["path", "edits"],
-};
-
-/** 每个工具可读字段的非空约束：path/command/content 不得为空串/纯空白。 */
-const NON_EMPTY: Record<string, string[]> = {
-	bash: ["command"],
-	powershell: ["command"],
-	write: ["path", "content"],
-	edit: ["path"],
-};
+import {
+	createBashToolDefinition,
+	createEditToolDefinition,
+	createReadToolDefinition,
+	createWriteToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
 	return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -53,104 +55,102 @@ function parseJsonLike(s: string): unknown {
 }
 
 /**
- * 深度修复“值再被包一层”的形态：
- *   - path 本身是对象（{ path: { path: '...' } }）→ 取字符串子字段；
- *   - edits 是 JSON 字符串 → 解析成数组；edits 是单个对象 → 包装成数组；
- *   - content 是 JSON 对象/数组串 → 解析（普通 markdown 文本不会被误解析）。
- * 仅在没有顶层正确字段时才修正；正常参数保持不变。
+ * 解包“多余的帧”。命中时返回新对象，未命中返回原引用（prepareArguments
+ * 依赖引用比较决定是否替换，见 agent-loop.js prepareToolCallArguments）。
+ *
+ * 处理的帧形态：
+ *   - 顶层只有 {arguments: "{...}"}（字符串帧）→ 解包为解析出的对象；
+ *   - 顶层只有 {arguments: {...}}（对象帧）→ 解包为内层对象；
+ *   - 顶层 arguments 为对象/字符串，且缺少必需字段时，把帧内字段提升到顶层
+ *     （顶层已有同名字段则保留顶层，不覆盖）；
+ *   - bash 特有 {commands: {...}} 值再包一层 → 把内层 command 提升到顶层。
  */
-function deepFixFrames(_tool: string, input: Record<string, unknown>): void {
-	if (input.path !== undefined && isPlainObject(input.path)) {
-		for (const k of ["path", "file", "f"]) {
-			const v = input.path[k];
-			if (typeof v === "string") {
-				input.path = v;
-				break;
-			}
-		}
-	}
-	if (typeof input.edits === "string") {
-		const v = parseJsonLike(input.edits);
-		if (Array.isArray(v)) input.edits = v;
-	}
-	if (isPlainObject(input.edits) && typeof (input.edits as Record<string, unknown>).oldText === "string") {
-		input.edits = [input.edits];
-	}
-	if (typeof input.content === "string") {
-		const v = parseJsonLike(input.content);
-		if (v && !Array.isArray(v)) input.content = v;
-	}
-}
+function unwrapFrames(input: unknown, required: readonly string[]): unknown {
+	if (!isPlainObject(input)) return input;
+	const args = input;
 
-/** 把命名帧里的缺失必需字段提升到顶层（顶层已有键优先，不覆盖）。返回是否修复。 */
-function liftFromFrames(input: Record<string, unknown>, required: string[]): boolean {
-	const candidates: Record<string, unknown>[] = [];
-	for (const f of ["arguments", "args", "payload", "input"]) {
-		if (!(f in input)) continue;
-		const raw = input[f];
-		if (isPlainObject(raw)) candidates.push(raw);
-		else if (typeof raw === "string") {
-			const o = parseJsonLike(raw);
-			if (o && isPlainObject(o)) candidates.push(o);
+	// 1) 字符串帧：{arguments: "{...}"} 或 {commands: "{...}"}
+	for (const key of ["arguments", "args", "commands"] as const) {
+		if (typeof args[key] === "string" && Object.keys(args).length === 1) {
+			const parsed = parseJsonLike(args[key]);
+			if (parsed !== null && isPlainObject(parsed)) return parsed;
 		}
 	}
+
+	// 2) 对象帧：{arguments: {...}} 或 {args: {...}}（顶层仅此一帧时直接解包）
+	for (const key of ["arguments", "args"] as const) {
+		if (isPlainObject(args[key]) && Object.keys(args).length === 1) {
+			return args[key];
+		}
+	}
+
+	// 3) 值再包一层：顶层同时存在多余帧与(部分)顶层字段。
+	//    仅当顶层缺必需字段时，从 arguments/args/payload/input 帧提升字段到顶层。
 	let fixed = false;
-	for (const c of candidates) {
+	const out: Record<string, unknown> = { ...args };
+	for (const key of ["arguments", "args", "payload", "input", "commands"] as const) {
+		const raw = out[key];
+		let inner: Record<string, unknown> | null = null;
+		if (isPlainObject(raw)) inner = raw;
+		else if (typeof raw === "string") {
+			const parsed = parseJsonLike(raw);
+			if (isPlainObject(parsed)) inner = parsed;
+		}
+		if (!inner) continue;
 		for (const k of required) {
-			if (input[k] === undefined && c[k] !== undefined) {
-				input[k] = c[k];
+			if (out[k] === undefined && inner[k] !== undefined) {
+				out[k] = inner[k];
 				fixed = true;
 			}
 		}
 	}
-	if (fixed) {
-		delete input.arguments;
-		if ("args" in input && (input.args === undefined || JSON.stringify(input.args) === JSON.stringify({}))) {
-			delete input.args;
+	if (!fixed) return input;
+	// 提升成功后移除已被吸收的空帧，避免残留多余字段干扰 Schema 校验。
+	for (const key of ["arguments", "args", "payload", "input", "commands"] as const) {
+		if (isPlainObject(out[key]) && Object.keys(out[key] as Record<string, unknown>).length === 0) {
+			delete out[key];
 		}
 	}
-	return fixed;
+	return out;
 }
 
-function dump(o: unknown): string {
-	try {
-		return JSON.stringify(o);
-	} catch {
-		return String(o);
-	}
+/** 每个被归一化工具的“必需字段”，用于帧提升判断（不用于阻断）。 */
+const REQUIRED: Record<string, readonly string[]> = {
+	bash: ["command"],
+	powershell: ["command"],
+	write: ["path", "content"],
+	edit: ["path", "edits"],
+	read: ["path"],
+};
+
+/** 给工具定义挂上 prepareArguments（未命中帧时原样返回，无副作用）。 */
+function withFrameFix<T extends ToolDefinition<any, any, any>>(def: T, required: readonly string[]): T {
+	const original = def.prepareArguments;
+	const prepared = (args: unknown) => {
+		const unwrapped = unwrapFrames(args, required);
+		if (unwrapped !== args) return unwrapped;
+		return original ? (original(args) as unknown) : args;
+	};
+	return { ...def, prepareArguments: prepared };
 }
 
 export default function (pi: ExtensionAPI): void {
-	pi.on(
-		"tool_call",
-		(event: ToolCallEvent & { input?: Record<string, unknown> }, _ctx): ToolCallEventResult | undefined => {
-			const input = event.input;
-			if (!isPlainObject(input)) return undefined;
+	const cwd = pi.cwd;
 
-			const required = REQUIRED[event.toolName];
-			if (required) {
-				// 1) 值再包一层 / 字符串化 edits / path 对象化：无条件深度修复
-				deepFixFrames(event.toolName, input);
-				// 2) 帧解包：若顶层缺必需字段，从 arguments/args/payload/input 帧提升
-				liftFromFrames(input, required);
-			}
-
-			// 非严格必需的工具：不阻断
-			if (!required) return undefined;
-
-			// 3) 硬约束：缺必需字段或必填为空 → 阻断，杜绝空转校验失败
-			const missing: string[] = required.filter(
-				(k) => input[k] === undefined || (NON_EMPTY[event.toolName]?.includes(k) && typeof input[k] === "string" && !input[k].toString().trim())
-			);
-			if (missing.length > 0) {
-				const reason =
-					`[arg-frame-fix] ${event.toolName} 调用被硬约束阻断：缺少必需字段 ${missing.join(",")}。` +
-					`请补齐为 ${event.toolName === "write" ? "{ path, content }" : event.toolName === "edit" ? "{ path, edits:[{oldText,newText}] }" : "{ command }"} 的顶层字段。` +
-					`原始 input=${dump(input)}`;
-				console.error(reason);
-				return { block: true, reason };
-			}
-			return undefined;
-		}
+	// 注意：不能在扩展加载阶段调用 pi.getSettings() —— Pi 1.2.0 在加载期
+	// 以 throwing stub 拒绝所有 action 方法（loader.js createExtensionRuntime，
+	// 报 "Extension runtime not initialized"）。本机无自定义 shellPath/
+	// shellCommandPrefix，createBashToolDefinition 默认 bash 即已生效选项；
+	// 若需自定义 shell，可后续改用事件回调（如 session_start）里读取 settings
+	// 再动态注册，或经 registerFlag 传入。
+	// 复用内置工厂构造完整工具定义，仅补 prepareArguments 帧归一化。
+	pi.registerTool(withFrameFix(createReadToolDefinition(cwd), REQUIRED.read));
+	pi.registerTool(withFrameFix(createWriteToolDefinition(cwd), REQUIRED.write));
+	pi.registerTool(withFrameFix(createEditToolDefinition(cwd), REQUIRED.edit));
+	pi.registerTool(
+		withFrameFix(
+			createBashToolDefinition(cwd, { exposeSessionEnvironment: true }),
+			REQUIRED.bash
+		)
 	);
 }
